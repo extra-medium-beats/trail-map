@@ -25,7 +25,12 @@
     <div id="map"></div>
     <h3>Trails:</h3>
     <div id="trail-list"></div>
-
+<div id="trail-detail" style="display:none; padding: 10px; border: 1px solid #ccc; margin-top: 20px;">
+  <h2 id="trail-detail-name"></h2>
+  <div id="trail-detail-map" style="height: 300px; margin-bottom: 10px;"></div>
+  <p id="trail-detail-description"></p>
+  <button id="back-to-map">Back to Map</button>
+</div>
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
 // Initialize the Leaflet map
@@ -196,6 +201,55 @@ document.getElementById('search-form').addEventListener('submit', e => {
 
 // Load initial trails for Round Lake, IL on page load
 fetchAndRenderTrails(42.3539, -88.0956, 'all');
+
+// --- Trail detail hash routing and rendering ---
+function renderTrailDetail(trailId) {
+  // Hide main map and trail list
+  document.getElementById('map').style.display = 'none';
+  document.getElementById('trail-list').style.display = 'none';
+  document.getElementById('trail-detail').style.display = 'block';
+
+  fetch(`/api/trail/${trailId}`)
+    .then(res => res.json())
+    .then(data => {
+      document.getElementById('trail-detail-name').textContent = data.name || 'Unnamed Trail';
+      document.getElementById('trail-detail-description').textContent =
+        `Surface: ${data.surface || 'Unknown'}, Length: ${data.length || 'Unknown'}`;
+
+      // Initialize Leaflet map in detail container
+      const detailMap = L.map('trail-detail-map').setView([data.center.lat, data.center.lon], 14);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(detailMap);
+
+      const latlngs = data.coordinates.map(c => [c.lat, c.lon]);
+      L.polyline(latlngs, { color: 'blue' }).addTo(detailMap);
+    });
+}
+
+document.getElementById('back-to-map').addEventListener('click', () => {
+  document.getElementById('trail-detail').style.display = 'none';
+  document.getElementById('map').style.display = 'block';
+  document.getElementById('trail-list').style.display = 'block';
+  history.pushState({}, '', '/');
+});
+
+window.addEventListener('hashchange', () => {
+  const match = location.hash.match(/^#\/trail\/(\d+)/);
+  if (match) {
+    renderTrailDetail(match[1]);
+  } else {
+    // If hash does not match trail pattern, show main map and trail list
+    document.getElementById('trail-detail').style.display = 'none';
+    document.getElementById('map').style.display = 'block';
+    document.getElementById('trail-list').style.display = 'block';
+  }
+});
+
+window.addEventListener('DOMContentLoaded', () => {
+  const match = location.hash.match(/^#\/trail\/(\d+)/);
+  if (match) {
+    renderTrailDetail(match[1]);
+  }
+});
     </script>
 </body>
 </html>
