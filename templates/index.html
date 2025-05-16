@@ -1,10 +1,201 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>$Title$</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trail Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        #map { height: 400px; margin-bottom: 20px; }
+        #trail-list { max-height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 8px; }
+    </style>
 </head>
 <body>
-$END$
+    <h1>Trail Map</h1>
+    <form id="search-form" style="margin-bottom: 10px;">
+        <input type="text" id="location" placeholder="Enter location" value="Round Lake, IL" required>
+        <select id="trail-type">
+            <option value="all">All Trails</option>
+            <option value="foot">Foot</option>
+            <option value="bicycle">Bicycle</option>
+            <option value="hiking">Hiking</option>
+        </select>
+        <button type="submit">Search</button>
+    </form>
+    <div id="map"></div>
+    <h3>Trails:</h3>
+    <div id="trail-list"></div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+// Initialize the Leaflet map
+var map = L.map('map').setView([42.3539, -88.0956], 12);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+// Yellow icon for highlighting
+const yellowIcon = L.icon({
+  iconUrl: 'https://maps.google.com/mapfiles/ms/icons/yellow-dot.png',
+  iconSize: [48, 48],
+  iconAnchor: [24, 48],
+  popupAnchor: [0, -48]
+});
+
+const trailMarkers = {};
+const trailPolylines = {};
+
+// Function to fetch trails and render them on map and list
+function fetchAndRenderTrails(lat, lon, trailType = 'all') {
+  const trailList = document.getElementById('trail-list');
+  trailList.innerHTML = '';
+
+  fetch(`/api/trails?lat=${lat}&lon=${lon}&trail_type=${trailType}`)
+    .then(response => response.json())
+    .then(data => {
+      if (!data.elements) {
+        alert('No trails data found.');
+        return;
+      }
+      const nodes = {};
+      const ways = [];
+
+      data.elements.forEach(el => {
+        if (el.type === 'node') {
+          nodes[el.id] = [el.lat, el.lon];
+        } else if (el.type === 'way') {
+          ways.push(el);
+        }
+      });
+
+      // Deduplicate trails by name within ~2 miles radius, showing only the furthest trailhead
+      const trailHeadsByName = {};
+
+      ways.forEach(way => {
+        if (!way.nodes || way.nodes.length === 0) return;
+        if (!way.tags || !way.tags.name) return;  // Skip unnamed trails
+
+        const latlngs = way.nodes.map(nodeId => nodes[nodeId]).filter(coord => coord);
+        if (latlngs.length === 0) return;
+
+        // Calculate midpoint
+        const midpoint = latlngs[Math.floor(latlngs.length / 2)];
+
+        // Calculate distances to start and end nodes
+        function haversineDistance(coord1, coord2) {
+          const toRad = deg => deg * Math.PI / 180;
+
+          function extractLatLon(c) {
+            if (Array.isArray(c)) return c;
+            if (c && typeof c.lat === 'number' && typeof c.lng === 'number') return [c.lat, c.lng];
+            throw new Error('Invalid coord format');
+          }
+
+          const [lat1, lon1] = extractLatLon(coord1);
+          const [lat2, lon2] = extractLatLon(coord2);
+
+          const R = 6371; // km
+          const dLat = toRad(lat2 - lat1);
+          const dLon = toRad(lon2 - lon1);
+          const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+          return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        const start = latlngs[0];
+        const end = latlngs[latlngs.length - 1];
+        const distToStart = haversineDistance(start, midpoint);
+        const distToEnd = haversineDistance(end, midpoint);
+        const trailhead = distToStart > distToEnd ? start : end;
+
+        const name = way.tags.name;
+
+        // Check if we already have a trailhead for this name within 2 miles (3.21868 km)
+        if (trailHeadsByName[name]) {
+          const existing = trailHeadsByName[name];
+          const existingDist = haversineDistance(existing.trailhead, midpoint);
+          const newDist = haversineDistance(trailhead, midpoint);
+
+          if (newDist <= existingDist || existingDist < 3.21868) {
+            // Existing is further or within radius, skip this one
+            return;
+          } else {
+            // New one is further and outside radius, replace existing
+            // Remove old marker/polyline from map
+            if (existing.marker) map.removeLayer(existing.marker);
+            if (existing.polyline) map.removeLayer(existing.polyline);
+          }
+        }
+
+        // Add polyline to map
+        const polyline = L.polyline(latlngs, { color: 'blue', weight: 3 }).addTo(map);
+
+        // Add marker for trailhead
+        const marker = L.marker(trailhead).addTo(map).bindPopup(name || 'Trailhead');
+
+        // Create link in trail list
+        const link = document.createElement('a');
+        link.href = `#/trail/${way.id}`;
+        link.textContent = name || `Trail ${way.id}`;
+        link.style.display = 'block';
+        link.style.marginBottom = '6px';
+
+        // Highlight on hover
+        link.addEventListener('mouseenter', () => {
+          marker.setIcon(yellowIcon);
+          marker.openPopup();
+          map.panTo(marker.getLatLng());
+          polyline.setStyle({ color: 'yellow', weight: 6 });
+        });
+
+        link.addEventListener('mouseleave', () => {
+          marker.setIcon(new L.Icon.Default());
+          marker.closePopup();
+          polyline.setStyle({ color: 'blue', weight: 3 });
+        });
+
+        trailHeadsByName[name] = { trailhead, marker, polyline };
+
+        trailList.appendChild(link);
+      });
+
+      map.setView([lat, lon], 13);
+    })
+    .catch(err => {
+      console.error('Error fetching trails:', err);
+      alert('Failed to load trails data.');
+    });
+}
+
+// Setup search form handler
+document.getElementById('search-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const location = document.getElementById('location').value;
+  const trailType = document.getElementById('trail-type').value;
+
+  if (!location) {
+    alert('Please enter a location');
+    return;
+  }
+
+  fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(location)}`)
+    .then(res => res.json())
+    .then(data => {
+      if (data.length === 0) {
+        alert('Location not found');
+        return;
+      }
+      const { lat, lon } = data[0];
+      fetchAndRenderTrails(lat, lon, trailType);
+    })
+    .catch(err => {
+      console.error('Error geocoding location:', err);
+      alert('Failed to get location coordinates');
+    });
+});
+
+// Load initial trails for Round Lake, IL on page load
+fetchAndRenderTrails(42.3539, -88.0956, 'all');
+    </script>
 </body>
 </html>
