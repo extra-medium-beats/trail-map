@@ -33,6 +33,26 @@
 </div>
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
+let userCountryCode = 'us'; // default fallback to US
+
+navigator.geolocation.getCurrentPosition(pos => {
+  const { latitude, longitude } = pos.coords;
+
+  fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`)
+    .then(res => res.json())
+    .then(data => {
+      if (data.address && data.address.country_code) {
+        userCountryCode = data.address.country_code.toLowerCase();
+        console.log("Detected user country code:", userCountryCode);
+      }
+    })
+    .catch(err => {
+      console.warn("Failed to determine user country:", err);
+    });
+}, err => {
+  console.warn("Geolocation denied or unavailable. Using fallback country code 'us'.", err);
+});
+
 // Initialize the Leaflet map
 var map = L.map('map').setView([42.3539, -88.0956], 12);
 
@@ -183,7 +203,7 @@ document.getElementById('search-form').addEventListener('submit', e => {
     return;
   }
 
-  fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(location)}`)
+  fetch(`https://nominatim.openstreetmap.org/search?format=json&countrycodes=${userCountryCode}&q=${encodeURIComponent(location)}`)
     .then(res => res.json())
     .then(data => {
       if (data.length === 0) {
