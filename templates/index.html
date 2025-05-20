@@ -22,6 +22,9 @@
         </select>
         <button type="submit">Search</button>
     </form>
+<label style="margin-left: 10px;">
+  <input type="checkbox" id="show-connected"> Show Connected Trails
+</label>
     <div id="map"></div>
     <h3>Trails:</h3>
     <div id="trail-list"></div>
@@ -76,6 +79,8 @@ function fetchAndRenderTrails(lat, lon, trailType = 'all') {
   const trailList = document.getElementById('trail-list');
   trailList.innerHTML = '';
 
+  const showConnected = document.getElementById('show-connected')?.checked;
+
   fetch(`/api/trails?lat=${lat}&lon=${lon}&trail_type=${trailType}`)
     .then(response => response.json())
     .then(data => {
@@ -93,6 +98,43 @@ function fetchAndRenderTrails(lat, lon, trailType = 'all') {
           ways.push(el);
         }
       });
+
+      // Enhanced connected trails detection logic with proximity-based connection detection
+      const connectedWays = new Map(); // Map of way id → Set of connected way ids
+      const endpoints = []; // Store way id and coordinates of start/end nodes
+
+      function haversineDistance(lat1, lon1, lat2, lon2) {
+        const toRad = deg => deg * Math.PI / 180;
+        const R = 6371; // km
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
+
+      // Build list of endpoints (start and end nodes)
+      ways.forEach(way => {
+        if (!way.nodes || way.nodes.length === 0) return;
+        const startNode = nodes[way.nodes[0]];
+        const endNode = nodes[way.nodes[way.nodes.length - 1]];
+        if (startNode) endpoints.push({ wayId: way.id, lat: startNode[0], lon: startNode[1] });
+        if (endNode) endpoints.push({ wayId: way.id, lat: endNode[0], lon: endNode[1] });
+      });
+
+      // Proximity-based connection detection
+      for (let i = 0; i < endpoints.length; i++) {
+        for (let j = i + 1; j < endpoints.length; j++) {
+          const a = endpoints[i];
+          const b = endpoints[j];
+          const dist = haversineDistance(a.lat, a.lon, b.lat, b.lon);
+          if (dist < 0.03) { // roughly 30 meters
+            if (!connectedWays.has(a.wayId)) connectedWays.set(a.wayId, new Set());
+            if (!connectedWays.has(b.wayId)) connectedWays.set(b.wayId, new Set());
+            connectedWays.get(a.wayId).add(b.wayId);
+            connectedWays.get(b.wayId).add(a.wayId);
+          }
+        }
+      }
 
       // Deduplicate trails by name within ~2 miles radius, showing only the furthest trailhead
       const trailHeadsByName = {};
@@ -152,36 +194,65 @@ function fetchAndRenderTrails(lat, lon, trailType = 'all') {
           }
         }
 
-        // Add polyline to map
-        const polyline = L.polyline(latlngs, { color: 'blue', weight: 3 }).addTo(map);
+        trailHeadsByName[name] = { trailhead };
+      });
 
-        // Add marker for trailhead
-        const marker = L.marker(trailhead).addTo(map).bindPopup(name || 'Trailhead');
+      // Render all trails with the same name together, showing only one marker/link per trail
+      const renderedTrailIds = new Set();
 
-        // Create link in trail list
+      Object.entries(trailHeadsByName).forEach(([name, { trailhead }]) => {
+        const relatedWays = ways.filter(way => {
+          if (!way.tags || way.tags.name !== name) return false;
+          if (!way.nodes || way.nodes.length === 0) return false;
+          const latlngs = way.nodes.map(nodeId => nodes[nodeId]).filter(coord => coord);
+          if (latlngs.length === 0) return false;
+          return true;
+        });
+
+        // Find the 'master' way (the one whose midpoint is furthest from the trailhead)
+        const masterWay = relatedWays.reduce((furthest, current) => {
+          const furthestMid = nodes[furthest.nodes[Math.floor(furthest.nodes.length / 2)]];
+          const currentMid = nodes[current.nodes[Math.floor(current.nodes.length / 2)]];
+          const furthestDist = haversineDistance(trailhead, furthestMid);
+          const currentDist = haversineDistance(trailhead, currentMid);
+          return currentDist > furthestDist ? current : furthest;
+        }, relatedWays[0]);
+
         const link = document.createElement('a');
-        link.href = `#/trail/${way.id}`;
-        link.textContent = name || `Trail ${way.id}`;
+        link.href = `#/trail/${masterWay.id}`;
+        link.textContent = name || `Trail ${masterWay.id}`;
         link.style.display = 'block';
         link.style.marginBottom = '6px';
 
-        // Highlight on hover
-        link.addEventListener('mouseenter', () => {
-          marker.setIcon(yellowIcon);
-          marker.openPopup();
-          map.panTo(marker.getLatLng());
-          polyline.setStyle({ color: 'yellow', weight: 6 });
-        });
-
-        link.addEventListener('mouseleave', () => {
-          marker.setIcon(new L.Icon.Default());
-          marker.closePopup();
-          polyline.setStyle({ color: 'blue', weight: 3 });
-        });
-
-        trailHeadsByName[name] = { trailhead, marker, polyline };
-
         trailList.appendChild(link);
+
+        relatedWays.forEach(way => {
+          if (renderedTrailIds.has(way.id)) return;
+          renderedTrailIds.add(way.id);
+
+          const latlngs = way.nodes.map(nodeId => nodes[nodeId]).filter(coord => coord);
+          const isConnected = showConnected && connectedWays.has(way.id);
+          const polyline = L.polyline(latlngs, {
+            color: isConnected ? 'green' : 'blue',
+            weight: 3,
+            dashArray: isConnected ? '6, 6' : null
+          }).addTo(map);
+
+          const marker = L.marker(trailhead).addTo(map).bindPopup(name || 'Trailhead');
+
+          link.addEventListener('mouseenter', () => {
+            marker.setIcon(yellowIcon);
+            marker.openPopup();
+            map.panTo(marker.getLatLng());
+            polyline.setStyle({ color: 'yellow', weight: 6 });
+          });
+
+          link.addEventListener('mouseleave', () => {
+            marker.setIcon(new L.Icon.Default());
+            marker.closePopup();
+            polyline.setStyle({ color: isConnected ? 'green' : 'blue', weight: 3, dashArray: isConnected ? '6, 6' : null });
+          });
+        });
       });
 
       map.setView([lat, lon], 13);
@@ -223,6 +294,7 @@ document.getElementById('search-form').addEventListener('submit', e => {
 fetchAndRenderTrails(42.3539, -88.0956, 'all');
 
 // --- Trail detail hash routing and rendering ---
+let detailMap = null;
 function renderTrailDetail(trailId) {
   // Hide main map and trail list
   document.getElementById('map').style.display = 'none';
@@ -236,12 +308,49 @@ function renderTrailDetail(trailId) {
       document.getElementById('trail-detail-description').textContent =
         `Surface: ${data.surface || 'Unknown'}, Length: ${data.length || 'Unknown'}`;
 
-      // Initialize Leaflet map in detail container
-      const detailMap = L.map('trail-detail-map').setView([data.center.lat, data.center.lon], 14);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(detailMap);
+      const detailMapContainer = document.getElementById('trail-detail-map');
+      if (detailMap) {
+        detailMap.remove();
+        detailMap = null;
+      }
+      detailMapContainer.innerHTML = ''; // Reset contents
 
-      const latlngs = data.coordinates.map(c => [c.lat, c.lon]);
-      L.polyline(latlngs, { color: 'blue' }).addTo(detailMap);
+      setTimeout(() => {
+        detailMap = L.map('trail-detail-map').setView([data.center.lat, data.center.lon], 14);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(detailMap);
+
+        const latlngs = data.coordinates.map(c => [c.lat, c.lon]);
+        const baseLine = L.polyline(latlngs, { color: 'blue', weight: 4 }).addTo(detailMap);
+
+        // Now try to fetch nearby trails of the same name to show connected ones
+        fetch(`/api/trails?lat=${data.center.lat}&lon=${data.center.lon}&trail_type=all`)
+          .then(res => res.json())
+          .then(trailData => {
+            const nodes = {};
+            const ways = [];
+
+            trailData.elements.forEach(el => {
+              if (el.type === 'node') {
+                nodes[el.id] = [el.lat, el.lon];
+              } else if (el.type === 'way') {
+                ways.push(el);
+              }
+            });
+
+            const matchingWays = ways.filter(w => w.tags && w.tags.name === data.name && w.id !== data.id);
+
+            matchingWays.forEach(way => {
+              const latlngs = way.nodes.map(nid => nodes[nid]).filter(c => c);
+              if (latlngs.length > 1) {
+                L.polyline(latlngs, {
+                  color: 'green',
+                  weight: 3,
+                  dashArray: '6, 6'
+                }).addTo(detailMap);
+              }
+            });
+          });
+      }, 0);
     });
 }
 
