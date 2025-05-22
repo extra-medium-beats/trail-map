@@ -1,6 +1,14 @@
 from flask import Flask, request, jsonify, render_template
 import requests
 import math
+# Mapillary OAuth Setup Info:
+# Client Token: MLY|9573143482797266|afeaf156aacbe54be201ffab3fa40981
+# Client Secret: MLY|9573143482797266|254ae8f48ba8fdc5743d0940195df7ac
+# Authorization URL: https://www.mapillary.com/connect?client_id=9573143482797266
+
+from dotenv import load_dotenv
+import os
+load_dotenv()
 
 print("Starting Flask app, registering routes")
 
@@ -202,6 +210,30 @@ out body;
         "coordinates": coordinates
     })
 
+@app.route('/api/mapillary-images')
+def get_mapillary_images():
+    lat = request.args.get('lat')
+    lon = request.args.get('lon')
+    if not lat or not lon:
+        return jsonify({'error': 'Missing coordinates'}), 400
+
+    client_token = os.getenv("MAPILLARY_CLIENT_TOKEN")
+    if not client_token:
+        return jsonify({'error': 'Missing Mapillary client token'}), 500
+
+    url = (
+        f"https://graph.mapillary.com/images"
+        f"?access_token={client_token}"
+        f"&fields=id,thumb_256_url&closeto={lon},{lat}&radius=200&limit=10"
+    )
+
+    try:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        return jsonify(resp.json())
+    except Exception as e:
+        print("Mapillary fetch error:", e)
+        return jsonify({'error': 'Mapillary API error'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
